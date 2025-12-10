@@ -1,6 +1,8 @@
 package com.xam.kiosk.ui;
 
 import android.app.Activity;
+import android.app.AlarmManager;
+import android.app.PendingIntent;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -10,9 +12,11 @@ import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
+import android.os.SystemClock;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.view.KeyEvent;
+import android.view.View;
 import android.view.WindowManager;
 import android.widget.Toast;
 import android.content.pm.PackageManager;
@@ -42,18 +46,45 @@ public class KioskActivity extends Activity {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_kiosk);
 
-        // Kiosk visual/UX locks
+        // Visual / UX kiosk behavior
         forceMaxBrightness();
         keepScreenOn();
+        enableImmersiveMode();   // hide nav + status bar
 
-        // Kiosk policy/device-owner locks
-        ensureDeviceOwnerAndLockTask();
-        lockVolumeToMax();
+        // Policy / device-owner kiosk behavior
+        ensureDeviceOwnerAndLockTask();   // lock task, disable status bar, OS-level restrictions
+        lockVolumeToMax();                // set volume to max (extra safety)
 
         // Optionally: auto-connect to Hub WiFi
         // ensureWifiConnectedToHub();
 
         launchNodeAppSmart();
+    }
+
+    @Override
+    protected void onResume() {
+        super.onResume();
+        // Re-apply in case system tries to restore UI
+        enableImmersiveMode();
+        lockVolumeToMax();
+    }
+
+    @Override
+    public void onWindowFocusChanged(boolean hasFocus) {
+        super.onWindowFocusChanged(hasFocus);
+        // If user somehow brings up system UI, slam it back down
+        if (hasFocus) {
+            enableImmersiveMode();
+        }
+    }
+
+    /**
+     * If the kiosk task is removed from recents, schedule a restart.
+     */
+    @Override
+    public void onTaskRemoved(Intent rootIntent) {
+        scheduleKioskRestart();
+        super.onTaskRemoved(rootIntent);
     }
 
     private boolean isNodeAppInstalled() {
@@ -74,14 +105,17 @@ public class KioskActivity extends Activity {
             String[] packages = new String[]{ NODE_APP_PACKAGE, getPackageName() };
             dpm.setLockTaskPackages(admin, packages);
 
-            // Disallow volume adjustment at OS level (extra safety)
+            // OS-level volume lock
             dpm.addUserRestriction(admin, UserManager.DISALLOW_ADJUST_VOLUME);
 
-            // Try to disable status bar / notification shade (may require privileged / system app)
+            // OS-level brightness config lock
+            dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BRIGHTNESS);
+
+            // Try to disable status bar / notification shade
             try {
                 dpm.setStatusBarDisabled(admin, true);
             } catch (Exception ignored) {
-                // Ignore if not supported
+                // Not supported on all devices / Android versions
             }
 
             try {
@@ -148,7 +182,6 @@ public class KioskActivity extends Activity {
         if (isNodeAppInstalled()) {
             launchNodeApp();
         } else {
-            // Optional: show a minimal “provisioning” UI or toast
             Toast.makeText(this,
                     "Waiting for NodeApp to be installed...",
                     Toast.LENGTH_SHORT).show();
@@ -196,6 +229,21 @@ public class KioskActivity extends Activity {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
+    /**
+     * Hide nav bar, status bar, recents button via immersive sticky mode.
+     */
+    private void enableImmersiveMode() {
+        View decorView = getWindow().getDecorView();
+        decorView.setSystemUiVisibility(
+                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                        | View.SYSTEM_UI_FLAG_FULLSCREEN
+        );
+    }
+
     private void lockVolumeToMax() {
         AudioManager audioManager =
                 (AudioManager) getSystemService(Context.AUDIO_SERVICE);
@@ -210,12 +258,14 @@ public class KioskActivity extends Activity {
         audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxAlarm, 0);
     }
 
+    /**
+     * Swallow hardware volume keys so user can't change volume.
+     */
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP
                 || keyCode == KeyEvent.KEYCODE_VOLUME_DOWN
                 || keyCode == KeyEvent.KEYCODE_VOLUME_MUTE) {
-            // Swallow volume keys
             return true;
         }
         return super.onKeyDown(keyCode, event);
@@ -229,5 +279,35 @@ public class KioskActivity extends Activity {
             return true;
         }
         return super.onKeyUp(keyCode, event);
+    }
+
+    /**
+     * Schedule kiosk restart via AlarmManager if task is removed.
+     */
+    private void scheduleKioskRestart() {
+        Intent restartIntent = new Intent(getApplicationContext(), KioskActivity.class);
+        restartIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+
+        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
+            flags |= PendingIntent.FLAG_IMMUTABLE;
+        }
+
+        PendingIntent pendingIntent = PendingIntent.getActivity(
+                getApplicationContext(),
+                0,
+                restartIntent,
+                flags
+        );
+
+        AlarmManager alarmManager =
+                (AlarmManager) getSystemService(Context.ALARM_SERVICE);
+        if (alarmManager != null) {
+            alarmManager.set(
+                    AlarmManager.ELAPSED_REALTIME,
+                    SystemClock.elapsedRealtime() + 1000, // 1 second later
+                    pendingIntent
+            );
+        }
     }
 }
