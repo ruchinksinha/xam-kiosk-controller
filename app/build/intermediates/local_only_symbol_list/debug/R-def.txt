@@ -1,0 +1,7 @@
+R_DEF: Internal format may change without notice
+local
+id brightnessLabel
+id brightnessSeek
+layout activity_kiosk
+string app_name
+xml device_admin_receiver
