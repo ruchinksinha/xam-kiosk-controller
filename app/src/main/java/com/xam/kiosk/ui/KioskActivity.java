@@ -34,11 +34,8 @@ public class KioskActivity extends Activity {
     private static final String NODE_APP_MAIN_ACTIVITY = "com.xam.nodeapp.MainActivity";
 
     // Hub WiFi settings (match WifiConfig-Hub.xml)
-    private static final String HUB_SSID = "\"XAM-HUB\"";
-    private static final String HUB_PSK  = "\"XamHubPassword123\"";
-
+    private static final String WIFI_SSID_KEY = "xam_hub_ssid";
     private static final long NODEAPP_RECHECK_MS = 5000; // 5 seconds
-
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     @Override
@@ -132,38 +129,55 @@ public class KioskActivity extends Activity {
     }
 
     private void ensureWifiConnectedToHub() {
-        WifiManager wifiManager = (WifiManager) getApplicationContext()
-                .getSystemService(Context.WIFI_SERVICE);
-        if (wifiManager == null) return;
+    WifiManager wifiManager = (WifiManager) getApplicationContext()
+            .getSystemService(Context.WIFI_SERVICE);
+    if (wifiManager == null) return;
 
-        if (!wifiManager.isWifiEnabled()) {
-            wifiManager.setWifiEnabled(true);
-        }
+    // Read SSID from Settings.Global (runtime injected)
+    String ssid = Settings.Global.getString(
+            getContentResolver(), WIFI_SSID_KEY);
 
-        WifiConfiguration targetConfig = null;
-        List<WifiConfiguration> configs = wifiManager.getConfiguredNetworks();
-        if (configs != null) {
-            for (WifiConfiguration c : configs) {
-                if (HUB_SSID.equals(c.SSID)) {
-                    targetConfig = c;
-                    break;
-                }
+    if (ssid == null || ssid.isEmpty()) {
+        return; // Wi-Fi not provisioned yet
+    }
+
+    if (!wifiManager.isWifiEnabled()) {
+        wifiManager.setWifiEnabled(true);
+    }
+
+    WifiConfiguration targetConfig = null;
+
+    List<WifiConfiguration> configs = wifiManager.getConfiguredNetworks();
+    if (configs != null) {
+        for (WifiConfiguration c : configs) {
+            if (ssid.equals(c.SSID)) {
+                targetConfig = c;
+                break;
             }
         }
-
-        if (targetConfig == null) {
-            WifiConfiguration wc = new WifiConfiguration();
-            wc.SSID = HUB_SSID;
-            wc.preSharedKey = HUB_PSK;
-            wc.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.WPA_PSK);
-            int netId = wifiManager.addNetwork(wc);
-            wifiManager.enableNetwork(netId, true);
-        } else {
-            wifiManager.enableNetwork(targetConfig.networkId, true);
-        }
-
-        wifiManager.reconnect();
     }
+
+    if (targetConfig == null) {
+        // OPEN NETWORK CONFIG
+        WifiConfiguration wc = new WifiConfiguration();
+        wc.SSID = ssid;   // must already be quoted
+        wc.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+        wc.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
+        wc.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
+        wc.allowedAuthAlgorithms.clear();
+        wc.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
+        wc.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
+        wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
+        wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
+
+        int netId = wifiManager.addNetwork(wc);
+        wifiManager.enableNetwork(netId, true);
+    } else {
+        wifiManager.enableNetwork(targetConfig.networkId, true);
+    }
+
+    wifiManager.reconnect();
+}
 
     private void launchNodeApp() {
         Intent intent = new Intent();
