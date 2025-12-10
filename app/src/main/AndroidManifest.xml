@@ -3,6 +3,7 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
+    <!-- Permissions -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
@@ -12,9 +13,11 @@
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.PACKAGE_USAGE_STATS"
+    <uses-permission
+        android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
-    <uses-permission android:name="android.permission.MANAGE_DEVICE_ADMINS"
+    <uses-permission
+        android:name="android.permission.MANAGE_DEVICE_ADMINS"
         tools:ignore="ProtectedPermissions" />
 
     <application
@@ -37,13 +40,15 @@
             </intent-filter>
         </receiver>
 
-        <!-- Boot completed receiver -->
+        <!-- Boot completed receiver: auto-start kiosk on boot -->
         <receiver
             android:name=".boot.BootCompletedReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
+                <!-- Optional: if you support direct boot -->
+                <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
@@ -54,15 +59,17 @@
             android:launchMode="singleTask"
             android:screenOrientation="portrait"
             android:taskAffinity=""
+            android:immersive="true"
             android:exported="true">
 
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-                <category android:name="android.intent.category.DEFAULT" />
+
+                <!-- Make this the home screen / launcher -->
                 <category android:name="android.intent.category.HOME" />
+                <category android:name="android.intent.category.DEFAULT" />
             </intent-filter>
         </activity>
 
     </application>
 </manifest>
-
