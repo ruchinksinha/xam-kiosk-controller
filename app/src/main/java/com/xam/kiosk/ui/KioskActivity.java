@@ -1,8 +1,6 @@
 package com.xam.kiosk.ui;
 
 import android.app.Activity;
-import android.app.AlarmManager;
-import android.app.PendingIntent;
 import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
@@ -12,7 +10,6 @@ import android.net.wifi.WifiManager;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
-import android.os.SystemClock;
 import android.os.UserManager;
 import android.provider.Settings;
 import android.view.KeyEvent;
@@ -73,15 +70,6 @@ public class KioskActivity extends Activity {
         if (hasFocus) {
             enableImmersiveMode();
         }
-    }
-
-    /**
-     * If the kiosk task is removed from recents, schedule a restart.
-     */
-    @Override
-    public void onTaskRemoved(Intent rootIntent) {
-        scheduleKioskRestart();
-        super.onTaskRemoved(rootIntent);
     }
 
     private boolean isNodeAppInstalled() {
@@ -293,35 +281,5 @@ public class KioskActivity extends Activity {
             return true;
         }
         return super.onKeyUp(keyCode, event);
-    }
-
-    /**
-     * Schedule kiosk restart via AlarmManager if task is removed.
-     */
-    private void scheduleKioskRestart() {
-        Intent restartIntent = new Intent(getApplicationContext(), KioskActivity.class);
-        restartIntent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
-
-        int flags = PendingIntent.FLAG_UPDATE_CURRENT;
-        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.M) {
-            flags |= PendingIntent.FLAG_IMMUTABLE;
-        }
-
-        PendingIntent pendingIntent = PendingIntent.getActivity(
-                getApplicationContext(),
-                0,
-                restartIntent,
-                flags
-        );
-
-        AlarmManager alarmManager =
-                (AlarmManager) getSystemService(Context.ALARM_SERVICE);
-        if (alarmManager != null) {
-            alarmManager.set(
-                    AlarmManager.ELAPSED_REALTIME,
-                    SystemClock.elapsedRealtime() + 1000, // 1 second later
-                    pendingIntent
-            );
-        }
     }
 }
