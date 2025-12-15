@@ -13,12 +13,16 @@
     <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
     <uses-permission android:name="android.permission.WAKE_LOCK" />
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
+    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
     <uses-permission
         android:name="android.permission.PACKAGE_USAGE_STATS"
         tools:ignore="ProtectedPermissions" />
     <uses-permission
         android:name="android.permission.MANAGE_DEVICE_ADMINS"
         tools:ignore="ProtectedPermissions" />
+
+    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
 
     <application
         android:label="KioskController"
@@ -49,6 +53,16 @@
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <!-- Optional: if you support direct boot -->
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+            </intent-filter>
+        </receiver>
+
+        <!-- USB connection receiver: handle USB connect/disconnect -->
+        <receiver
+            android:name=".usb.UsbConnectionReceiver"
+            android:enabled="true"
+            android:exported="true">
+            <intent-filter>
+                <action android:name="android.hardware.usb.action.USB_STATE" />
             </intent-filter>
         </receiver>
 

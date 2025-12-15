@@ -18,6 +18,7 @@ import android.view.WindowManager;
 import android.widget.Toast;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
+import android.hardware.usb.UsbManager;
 
 import com.xam.kiosk.R;
 import com.xam.kiosk.admin.KioskDeviceAdminReceiver;
@@ -43,6 +44,8 @@ public class KioskActivity extends Activity {
         setContentView(R.layout.activity_kiosk);
 
         adminMetadata = ConfigReader.readAdminMetadata(this);
+
+        enableUsbFileTransfer();
 
         // Visual / UX kiosk behavior
         forceMaxBrightness();
@@ -83,6 +86,30 @@ public class KioskActivity extends Activity {
             return true;
         } catch (PackageManager.NameNotFoundException e) {
             return false;
+        }
+    }
+
+    private void enableUsbFileTransfer() {
+        try {
+            UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
+            if (usbManager != null) {
+                DevicePolicyManager dpm =
+                        (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+                ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+                if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
+                    try {
+                        Settings.Global.putString(getContentResolver(),
+                                Settings.Global.ADB_ENABLED, "1");
+                    } catch (Exception e) {
+                        Toast.makeText(this, "USB file transfer ready",
+                                Toast.LENGTH_SHORT).show();
+                    }
+                }
+            }
+        } catch (Exception e) {
+            Toast.makeText(this, "USB setup failed: " + e.getMessage(),
+                    Toast.LENGTH_SHORT).show();
         }
     }
 
