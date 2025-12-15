@@ -21,6 +21,8 @@ import android.media.AudioManager;
 
 import com.xam.kiosk.R;
 import com.xam.kiosk.admin.KioskDeviceAdminReceiver;
+import com.xam.kiosk.model.AdminMetadata;
+import com.xam.kiosk.util.ConfigReader;
 
 import java.util.List;
 
@@ -30,15 +32,17 @@ public class KioskActivity extends Activity {
     private static final String NODE_APP_PACKAGE = "com.xam.nodeapp";
     private static final String NODE_APP_MAIN_ACTIVITY = "com.xam.nodeapp.MainActivity";
 
-    // Hub WiFi settings (match WifiConfig-Hub.xml)
-    private static final String WIFI_SSID_KEY = "xam_hub_ssid";
     private static final long NODEAPP_RECHECK_MS = 5000; // 5 seconds
     private final Handler handler = new Handler(Looper.getMainLooper());
+
+    private AdminMetadata adminMetadata;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_kiosk);
+
+        adminMetadata = ConfigReader.readAdminMetadata(this);
 
         // Visual / UX kiosk behavior
         forceMaxBrightness();
@@ -49,8 +53,9 @@ public class KioskActivity extends Activity {
         ensureDeviceOwnerAndLockTask();   // lock task, disable status bar, OS-level restrictions
         lockVolumeToMax();                // set volume to max (extra safety)
 
-        // Optionally: auto-connect to Hub WiFi
-        // ensureWifiConnectedToHub();
+        if (adminMetadata != null && adminMetadata.getSsid() != null) {
+            ensureWifiConnectedToHub();
+        }
 
         launchNodeAppSmart();
     }
@@ -121,13 +126,12 @@ public class KioskActivity extends Activity {
             .getSystemService(Context.WIFI_SERVICE);
     if (wifiManager == null) return;
 
-    // Read SSID from Settings.Global (runtime injected)
-    String ssid = Settings.Global.getString(
-            getContentResolver(), WIFI_SSID_KEY);
-
-    if (ssid == null || ssid.isEmpty()) {
-        return; // Wi-Fi not provisioned yet
+    if (adminMetadata == null || adminMetadata.getSsid() == null ||
+        adminMetadata.getSsid().isEmpty()) {
+        return;
     }
+
+    String ssid = "\"" + adminMetadata.getSsid() + "\"";
 
     if (!wifiManager.isWifiEnabled()) {
         wifiManager.setWifiEnabled(true);
