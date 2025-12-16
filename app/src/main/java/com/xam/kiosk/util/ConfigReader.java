@@ -1,6 +1,7 @@
 package com.xam.kiosk.util;
 
 import android.content.Context;
+import android.os.Environment;
 import android.util.Log;
 
 import com.xam.kiosk.model.AdminMetadata;
@@ -15,10 +16,13 @@ import java.io.InputStreamReader;
 
 public class ConfigReader {
     private static final String TAG = "ConfigReader";
-    private static final String CONFIG_FILENAME = "admin_metadata.json";
+    private static final String CONFIG_FOLDER = "XAM";
+    private static final String CONFIG_FILENAME = "metadata.json";
 
     public static AdminMetadata readAdminMetadata(Context context) {
-        File configFile = new File(context.getFilesDir(), CONFIG_FILENAME);
+        File externalStorage = Environment.getExternalStorageDirectory();
+        File configFolder = new File(externalStorage, CONFIG_FOLDER);
+        File configFile = new File(configFolder, CONFIG_FILENAME);
 
         if (!configFile.exists()) {
             Log.w(TAG, "Config file not found at: " + configFile.getAbsolutePath());

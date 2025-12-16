@@ -23,12 +23,17 @@ import android.widget.Toast;
 import android.content.pm.PackageManager;
 import android.media.AudioManager;
 import android.hardware.usb.UsbManager;
+import android.net.Uri;
+import android.os.Environment;
+
+import androidx.core.content.FileProvider;
 
 import com.xam.kiosk.R;
 import com.xam.kiosk.admin.KioskDeviceAdminReceiver;
 import com.xam.kiosk.model.AdminMetadata;
 import com.xam.kiosk.util.ConfigReader;
 
+import java.io.File;
 import java.util.List;
 
 public class KioskActivity extends Activity {
@@ -38,18 +43,20 @@ public class KioskActivity extends Activity {
     private static final String NODE_APP_MAIN_ACTIVITY = "com.xam.nodeapp.MainActivity";
 
     private static final long NODEAPP_RECHECK_MS = 5000; // 5 seconds
+    private static final long CONFIG_RETRY_MS = 5000; // 5 seconds
+    private static final int INSTALL_REQUEST_CODE = 1001;
+
     private final Handler handler = new Handler(Looper.getMainLooper());
 
     private AdminMetadata adminMetadata;
+    private boolean isInstallingApp = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
         setContentView(R.layout.activity_kiosk);
 
-        adminMetadata = ConfigReader.readAdminMetadata(this);
-
-        enableUsbFileTransfer();
+        setUsbModeToFileTransfer();
 
         // Visual / UX kiosk behavior
         forceMaxBrightness();
@@ -60,11 +67,7 @@ public class KioskActivity extends Activity {
         ensureDeviceOwnerAndLockTask();   // lock task, disable status bar, OS-level restrictions
         lockVolumeToMax();                // set volume to max (extra safety)
 
-        if (adminMetadata != null && adminMetadata.getSsid() != null) {
-            ensureWifiConnectedToHub();
-        }
-
-        launchNodeAppSmart();
+        waitForConfigAndInitialize();
     }
 
     @Override
@@ -93,14 +96,69 @@ public class KioskActivity extends Activity {
         }
     }
 
-    private void enableUsbFileTransfer() {
+    private void waitForConfigAndInitialize() {
+        adminMetadata = ConfigReader.readAdminMetadata(this);
+
+        if (adminMetadata == null) {
+            Log.i("KioskActivity", "Config file not found, retrying in 5 seconds...");
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    waitForConfigAndInitialize();
+                }
+            }, CONFIG_RETRY_MS);
+            return;
+        }
+
+        Log.i("KioskActivity", "Config file loaded successfully");
+
+        if (adminMetadata.getSsid() != null) {
+            ensureWifiConnectedToHub();
+        }
+
+        if (!isNodeAppInstalled()) {
+            installNodeApp();
+        } else {
+            setUsbModeToCharging();
+            launchNodeApp();
+        }
+    }
+
+    private void setUsbModeToFileTransfer() {
         try {
-            UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
-            if (usbManager != null) {
-                Log.i("KioskActivity", "USB file transfer ready");
+            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
+                try {
+                    Settings.Global.putString(getContentResolver(),
+                            "usb_mass_storage_enabled", "1");
+                } catch (Exception e) {
+                    Log.e("KioskActivity", "Failed to set USB mode: " + e.getMessage());
+                }
             }
+            Log.i("KioskActivity", "USB mode set to File Transfer");
         } catch (Exception e) {
             Log.e("KioskActivity", "USB setup failed: " + e.getMessage());
+        }
+    }
+
+    private void setUsbModeToCharging() {
+        try {
+            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
+                try {
+                    Settings.Global.putString(getContentResolver(),
+                            "usb_mass_storage_enabled", "0");
+                } catch (Exception e) {
+                    Log.e("KioskActivity", "Failed to set USB mode: " + e.getMessage());
+                }
+            }
+            Log.i("KioskActivity", "USB mode set to Charging");
+        } catch (Exception e) {
+            Log.e("KioskActivity", "USB mode change failed: " + e.getMessage());
         }
     }
 
@@ -198,6 +256,82 @@ public class KioskActivity extends Activity {
     wifiManager.reconnect();
 }
 
+    private void installNodeApp() {
+        if (adminMetadata == null || adminMetadata.getNodeappApkPath() == null) {
+            Log.e("KioskActivity", "No APK path configured");
+            return;
+        }
+
+        if (isInstallingApp) {
+            Log.i("KioskActivity", "Installation already in progress");
+            return;
+        }
+
+        File externalStorage = Environment.getExternalStorageDirectory();
+        File apkFile = new File(externalStorage, adminMetadata.getNodeappApkPath());
+
+        if (!apkFile.exists()) {
+            Log.e("KioskActivity", "APK file not found: " + apkFile.getAbsolutePath());
+            handler.postDelayed(new Runnable() {
+                @Override
+                public void run() {
+                    installNodeApp();
+                }
+            }, NODEAPP_RECHECK_MS);
+            return;
+        }
+
+        isInstallingApp = true;
+        Log.i("KioskActivity", "Installing NodeApp from: " + apkFile.getAbsolutePath());
+
+        try {
+            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
+                Uri apkUri = Uri.fromFile(apkFile);
+                Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
+                intent.setData(apkUri);
+                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
+                intent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
+                intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
+                startActivityForResult(intent, INSTALL_REQUEST_CODE);
+            } else {
+                Log.e("KioskActivity", "Not device owner, cannot install APK");
+                isInstallingApp = false;
+            }
+        } catch (Exception e) {
+            Log.e("KioskActivity", "Failed to install APK: " + e.getMessage());
+            isInstallingApp = false;
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (requestCode == INSTALL_REQUEST_CODE) {
+            isInstallingApp = false;
+            if (resultCode == RESULT_OK) {
+                Log.i("KioskActivity", "NodeApp installed successfully");
+                setUsbModeToCharging();
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        launchNodeApp();
+                    }
+                }, 2000);
+            } else {
+                Log.e("KioskActivity", "NodeApp installation failed");
+                handler.postDelayed(new Runnable() {
+                    @Override
+                    public void run() {
+                        installNodeApp();
+                    }
+                }, NODEAPP_RECHECK_MS);
+            }
+        }
+    }
+
     private void launchNodeApp() {
         Intent intent = new Intent();
         intent.setClassName(NODE_APP_PACKAGE, NODE_APP_MAIN_ACTIVITY);
@@ -207,25 +341,6 @@ public class KioskActivity extends Activity {
             Log.i("KioskActivity", "Launching NodeApp");
         } catch (Exception e) {
             Log.e("KioskActivity", "Failed to launch NodeApp: " + e.getMessage());
-        }
-    }
-
-    private void launchNodeAppSmart() {
-        if (isNodeAppInstalled()) {
-            launchNodeApp();
-        } else {
-            Log.i("KioskActivity", "Waiting for NodeApp to be installed...");
-
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    if (isNodeAppInstalled()) {
-                        launchNodeApp();
-                    } else {
-                        handler.postDelayed(this, NODEAPP_RECHECK_MS);
-                    }
-                }
-            }, NODEAPP_RECHECK_MS);
         }
     }
 
