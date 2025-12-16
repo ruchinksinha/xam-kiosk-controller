@@ -3,7 +3,6 @@ package com.xam.kiosk.usb;
 import android.content.BroadcastReceiver;
 import android.content.Context;
 import android.content.Intent;
-import android.hardware.usb.UsbManager;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.util.Log;
@@ -16,14 +15,15 @@ import java.util.List;
 
 public class UsbConnectionReceiver extends BroadcastReceiver {
     private static final String TAG = "UsbConnectionReceiver";
+    private static final String ACTION_USB_STATE = "android.hardware.usb.action.USB_STATE";
 
     @Override
     public void onReceive(Context context, Intent intent) {
         String action = intent.getAction();
 
-        if (UsbManager.ACTION_USB_STATE.equals(action)) {
-            boolean connected = intent.getBooleanExtra(UsbManager.USB_CONNECTED, false);
-            boolean configured = intent.getBooleanExtra(UsbManager.USB_CONFIGURED, false);
+        if (ACTION_USB_STATE.equals(action)) {
+            boolean connected = intent.getBooleanExtra("connected", false);
+            boolean configured = intent.getBooleanExtra("configured", false);
 
             if (connected) {
                 Log.i(TAG, "USB connected - File transfer enabled");
@@ -114,3 +114,4 @@ public class UsbConnectionReceiver extends BroadcastReceiver {
         Toast.makeText(context, "WiFi connection initiated", Toast.LENGTH_SHORT).show();
     }
 }
+
