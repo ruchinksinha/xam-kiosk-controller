@@ -27,4 +27,5 @@ replay_pid*
 .kotlin/
 
 app/build
+app/build/
 
