@@ -7,13 +7,17 @@ import android.content.Context;
 import android.content.Intent;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
+import android.os.Build;
 import android.os.Bundle;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.UserManager;
 import android.provider.Settings;
+import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
+import android.view.WindowInsets;
+import android.view.WindowInsetsController;
 import android.view.WindowManager;
 import android.widget.Toast;
 import android.content.pm.PackageManager;
@@ -93,23 +97,10 @@ public class KioskActivity extends Activity {
         try {
             UsbManager usbManager = (UsbManager) getSystemService(Context.USB_SERVICE);
             if (usbManager != null) {
-                DevicePolicyManager dpm =
-                        (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-                ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
-
-                if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
-                    try {
-                        Settings.Global.putString(getContentResolver(),
-                                Settings.Global.ADB_ENABLED, "1");
-                    } catch (Exception e) {
-                        Toast.makeText(this, "USB file transfer ready",
-                                Toast.LENGTH_SHORT).show();
-                    }
-                }
+                Log.i("KioskActivity", "USB file transfer ready");
             }
         } catch (Exception e) {
-            Toast.makeText(this, "USB setup failed: " + e.getMessage(),
-                    Toast.LENGTH_SHORT).show();
+            Log.e("KioskActivity", "USB setup failed: " + e.getMessage());
         }
     }
 
@@ -138,13 +129,10 @@ public class KioskActivity extends Activity {
             try {
                 startLockTask();
             } catch (IllegalStateException e) {
-                Toast.makeText(this, "LockTask failed: " + e.getMessage(),
-                        Toast.LENGTH_SHORT).show();
+                Log.e("KioskActivity", "LockTask failed: " + e.getMessage());
             }
         } else {
-            Toast.makeText(this,
-                    "Device is not device-owner. Run dpm set-device-owner.",
-                    Toast.LENGTH_LONG).show();
+            Log.w("KioskActivity", "Device is not device-owner. Run dpm set-device-owner.");
         }
     }
 
@@ -190,9 +178,21 @@ public class KioskActivity extends Activity {
         wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
 
         int netId = wifiManager.addNetwork(wc);
-        wifiManager.enableNetwork(netId, true);
+        if (netId == -1) {
+            Log.e("KioskActivity", "Failed to add WiFi network: " + ssid);
+            return;
+        }
+        boolean enabled = wifiManager.enableNetwork(netId, true);
+        if (!enabled) {
+            Log.e("KioskActivity", "Failed to enable WiFi network: " + ssid);
+            return;
+        }
     } else {
-        wifiManager.enableNetwork(targetConfig.networkId, true);
+        boolean enabled = wifiManager.enableNetwork(targetConfig.networkId, true);
+        if (!enabled) {
+            Log.e("KioskActivity", "Failed to enable existing WiFi network: " + ssid);
+            return;
+        }
     }
 
     wifiManager.reconnect();
@@ -204,10 +204,9 @@ public class KioskActivity extends Activity {
         intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
         try {
             startActivity(intent);
+            Log.i("KioskActivity", "Launching NodeApp");
         } catch (Exception e) {
-            Toast.makeText(this,
-                    "Failed to launch NodeApp: " + e.getMessage(),
-                    Toast.LENGTH_LONG).show();
+            Log.e("KioskActivity", "Failed to launch NodeApp: " + e.getMessage());
         }
     }
 
@@ -215,9 +214,7 @@ public class KioskActivity extends Activity {
         if (isNodeAppInstalled()) {
             launchNodeApp();
         } else {
-            Toast.makeText(this,
-                    "Waiting for NodeApp to be installed...",
-                    Toast.LENGTH_SHORT).show();
+            Log.i("KioskActivity", "Waiting for NodeApp to be installed...");
 
             handler.postDelayed(new Runnable() {
                 @Override
@@ -254,7 +251,7 @@ public class KioskActivity extends Activity {
             getWindow().setAttributes(layoutParams);
 
         } catch (Exception e) {
-            Toast.makeText(this, "Brightness lock failed", Toast.LENGTH_SHORT).show();
+            Log.e("KioskActivity", "Brightness lock failed: " + e.getMessage());
         }
     }
 
@@ -266,15 +263,24 @@ public class KioskActivity extends Activity {
      * Hide nav bar, status bar, recents button via immersive sticky mode.
      */
     private void enableImmersiveMode() {
-        View decorView = getWindow().getDecorView();
-        decorView.setSystemUiVisibility(
-                View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                        | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                        | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                        | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                        | View.SYSTEM_UI_FLAG_FULLSCREEN
-        );
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+            WindowInsetsController controller = getWindow().getInsetsController();
+            if (controller != null) {
+                controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
+                controller.setSystemBarsBehavior(
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+            }
+        } else {
+            View decorView = getWindow().getDecorView();
+            decorView.setSystemUiVisibility(
+                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                            | View.SYSTEM_UI_FLAG_FULLSCREEN
+            );
+        }
     }
 
     private void lockVolumeToMax() {

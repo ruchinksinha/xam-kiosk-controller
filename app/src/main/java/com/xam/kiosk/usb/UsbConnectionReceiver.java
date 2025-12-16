@@ -27,13 +27,8 @@ public class UsbConnectionReceiver extends BroadcastReceiver {
 
             if (connected) {
                 Log.i(TAG, "USB connected - File transfer enabled");
-                Toast.makeText(context, "USB connected - File transfer ready",
-                    Toast.LENGTH_SHORT).show();
             } else {
                 Log.i(TAG, "USB disconnected - Reading config and connecting to WiFi");
-                Toast.makeText(context, "USB disconnected - Checking config",
-                    Toast.LENGTH_SHORT).show();
-
                 handleUsbDisconnected(context);
             }
         }
@@ -44,22 +39,15 @@ public class UsbConnectionReceiver extends BroadcastReceiver {
 
         if (metadata == null) {
             Log.w(TAG, "No config file found");
-            Toast.makeText(context, "No configuration file found",
-                Toast.LENGTH_SHORT).show();
             return;
         }
 
         if (metadata.getSsid() == null || metadata.getSsid().isEmpty()) {
             Log.w(TAG, "No SSID in config file");
-            Toast.makeText(context, "No SSID configured",
-                Toast.LENGTH_SHORT).show();
             return;
         }
 
         Log.i(TAG, "Connecting to WiFi: " + metadata.getSsid());
-        Toast.makeText(context, "Connecting to: " + metadata.getSsid(),
-            Toast.LENGTH_SHORT).show();
-
         connectToWifi(context, metadata.getSsid());
     }
 
@@ -103,15 +91,27 @@ public class UsbConnectionReceiver extends BroadcastReceiver {
             wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
 
             int netId = wifiManager.addNetwork(wc);
-            wifiManager.enableNetwork(netId, true);
+            if (netId == -1) {
+                Log.e(TAG, "Failed to add WiFi network: " + ssid);
+                return;
+            }
+            boolean enabled = wifiManager.enableNetwork(netId, true);
+            if (!enabled) {
+                Log.e(TAG, "Failed to enable new WiFi network: " + ssid);
+                return;
+            }
             Log.i(TAG, "Added new WiFi network: " + ssid);
         } else {
-            wifiManager.enableNetwork(targetConfig.networkId, true);
+            boolean enabled = wifiManager.enableNetwork(targetConfig.networkId, true);
+            if (!enabled) {
+                Log.e(TAG, "Failed to enable existing WiFi network: " + ssid);
+                return;
+            }
             Log.i(TAG, "Enabled existing WiFi network: " + ssid);
         }
 
         wifiManager.reconnect();
-        Toast.makeText(context, "WiFi connection initiated", Toast.LENGTH_SHORT).show();
+        Log.i(TAG, "WiFi connection initiated");
     }
 }
 

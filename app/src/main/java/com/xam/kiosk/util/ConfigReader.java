@@ -25,18 +25,15 @@ public class ConfigReader {
             return null;
         }
 
-        try {
-            FileInputStream fis = new FileInputStream(configFile);
-            BufferedReader reader = new BufferedReader(new InputStreamReader(fis));
+        try (FileInputStream fis = new FileInputStream(configFile);
+             BufferedReader reader = new BufferedReader(new InputStreamReader(fis))) {
+
             StringBuilder jsonBuilder = new StringBuilder();
             String line;
 
             while ((line = reader.readLine()) != null) {
                 jsonBuilder.append(line);
             }
-
-            reader.close();
-            fis.close();
 
             JSONObject jsonObject = new JSONObject(jsonBuilder.toString());
 
