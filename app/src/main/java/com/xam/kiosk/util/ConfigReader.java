@@ -1,67 +1,53 @@
 package com.xam.kiosk.util;
 
-import android.content.Context;
-import android.os.Environment;
 import android.util.Log;
 
-import com.xam.kiosk.model.AdminMetadata;
+import com.xam.kiosk.model.Config;
 
-import org.json.JSONException;
 import org.json.JSONObject;
 
-import java.io.BufferedReader;
 import java.io.File;
 import java.io.FileInputStream;
-import java.io.InputStreamReader;
+import java.nio.charset.StandardCharsets;
 
 public class ConfigReader {
-    private static final String TAG = "ConfigReader";
-    private static final String CONFIG_FOLDER = "XAM";
-    private static final String CONFIG_FILENAME = "metadata.json";
 
-    public static AdminMetadata readAdminMetadata(Context context) {
-        File externalStorage = Environment.getExternalStorageDirectory();
-        File configFolder = new File(externalStorage, CONFIG_FOLDER);
-        File configFile = new File(configFolder, CONFIG_FILENAME);
+    // Host will copy config here via MTP:
+    // /sdcard/xam/config.json
+    public static final String CONFIG_PATH = "/sdcard/xam/config.json";
 
-        if (!configFile.exists()) {
-            Log.w(TAG, "Config file not found at: " + configFile.getAbsolutePath());
-            return null;
-        }
-
-        try (FileInputStream fis = new FileInputStream(configFile);
-             BufferedReader reader = new BufferedReader(new InputStreamReader(fis))) {
-
-            StringBuilder jsonBuilder = new StringBuilder();
-            String line;
-
-            while ((line = reader.readLine()) != null) {
-                jsonBuilder.append(line);
+    public static Config readConfig() {
+        try {
+            File f = new File(CONFIG_PATH);
+            if (!f.exists()) {
+                Log.i("ConfigReader", "Config not found: " + CONFIG_PATH);
+                return null;
             }
 
-            JSONObject jsonObject = new JSONObject(jsonBuilder.toString());
-
-            AdminMetadata metadata = new AdminMetadata();
-
-            if (jsonObject.has("ssid")) {
-                metadata.setSsid(jsonObject.getString("ssid"));
+            byte[] data;
+            try (FileInputStream fis = new FileInputStream(f)) {
+                data = new byte[(int) f.length()];
+                int read = fis.read(data);
+                if (read <= 0) return null;
             }
 
-            if (jsonObject.has("nodeapp_apk_path")) {
-                metadata.setNodeappApkPath(jsonObject.getString("nodeapp_apk_path"));
+            String json = new String(data, StandardCharsets.UTF_8);
+            JSONObject o = new JSONObject(json);
+
+            String ssid = o.optString("ssid", "").trim();
+            String apkPath = o.optString("nodeapp_apk_path", "").trim();
+
+            if (ssid.isEmpty() || apkPath.isEmpty()) {
+                Log.e("ConfigReader", "Config missing required fields: " + json);
+                return null;
             }
 
-            Log.i(TAG, "Successfully loaded config: SSID=" + metadata.getSsid() +
-                      ", APK Path=" + metadata.getNodeappApkPath());
+            return new Config(ssid, apkPath);
 
-            return metadata;
-
-        } catch (JSONException e) {
-            Log.e(TAG, "Failed to parse JSON config file", e);
-            return null;
         } catch (Exception e) {
-            Log.e(TAG, "Failed to read config file", e);
+            Log.e("ConfigReader", "Failed to read config: " + e.getMessage(), e);
             return null;
         }
     }
 }
+

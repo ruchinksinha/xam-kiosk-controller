@@ -5,416 +5,429 @@ import android.app.admin.DevicePolicyManager;
 import android.content.ComponentName;
 import android.content.Context;
 import android.content.Intent;
+import android.content.IntentFilter;
+import android.content.pm.PackageManager;
+import android.net.Uri;
 import android.net.wifi.WifiConfiguration;
 import android.net.wifi.WifiManager;
 import android.os.Build;
 import android.os.Bundle;
+import android.os.Environment;
 import android.os.Handler;
 import android.os.Looper;
 import android.os.UserManager;
-import android.provider.Settings;
 import android.util.Log;
 import android.view.KeyEvent;
 import android.view.View;
 import android.view.WindowInsets;
 import android.view.WindowInsetsController;
 import android.view.WindowManager;
-import android.widget.Toast;
-import android.content.pm.PackageManager;
-import android.media.AudioManager;
-import android.hardware.usb.UsbManager;
-import android.net.Uri;
-import android.os.Environment;
-
-import androidx.core.content.FileProvider;
 
 import com.xam.kiosk.R;
 import com.xam.kiosk.admin.KioskDeviceAdminReceiver;
-import com.xam.kiosk.model.AdminMetadata;
-import com.xam.kiosk.util.ConfigReader;
 
+import org.json.JSONObject;
+
+import java.io.BufferedReader;
 import java.io.File;
+import java.io.FileReader;
 import java.util.List;
 
 public class KioskActivity extends Activity {
+
+    private static final String TAG = "KioskActivity";
 
     // NodeApp details
     private static final String NODE_APP_PACKAGE = "com.xam.nodeapp";
     private static final String NODE_APP_MAIN_ACTIVITY = "com.xam.nodeapp.MainActivity";
 
-    private static final long NODEAPP_RECHECK_MS = 5000; // 5 seconds
-    private static final long CONFIG_RETRY_MS = 5000; // 5 seconds
-    private static final int INSTALL_REQUEST_CODE = 1001;
+    // Provisioning file pushed via MTP
+    private static final String DEFAULT_CONFIG_PATH = "/sdcard/config.json";
+
+    // Retry pacing
+    private static final long CONFIG_RECHECK_MS  = 3000;
+    private static final long WIFI_RECHECK_MS    = 5000;
+    private static final long INSTALL_RECHECK_MS = 5000;
 
     private final Handler handler = new Handler(Looper.getMainLooper());
 
-    private AdminMetadata adminMetadata;
-    private boolean isInstallingApp = false;
+    private String ssidFromConfig;
+    private String nodeApkPathFromConfig; // relative or absolute
+
+    private boolean launchAttempted = false;
+    private boolean installTriggered = false;
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
         super.onCreate(savedInstanceState);
+
+        // IMPORTANT: Ensure decor view exists before immersive APIs (fixes Lenovo A13 NPE)
         setContentView(R.layout.activity_kiosk);
 
-        setUsbModeToFileTransfer();
-
-        // Visual / UX kiosk behavior
-        forceMaxBrightness();
         keepScreenOn();
-        enableImmersiveMode();   // hide nav + status bar
+        forceMaxBrightness();
 
-        // Policy / device-owner kiosk behavior
-        ensureDeviceOwnerAndLockTask();   // lock task, disable status bar, OS-level restrictions
-        lockVolumeToMax();                // set volume to max (extra safety)
+        // Do NOT call immersive synchronously here on some OEM builds; post it.
+        handler.post(this::enableImmersiveModeSafe);
 
-        waitForConfigAndInitialize();
+        // Do NOT disable USB file transfer here; MTP provisioning depends on it.
+
+        // If device owner: force kiosk as HOME + allow locktask packages
+        ensurePoliciesIfDeviceOwner();
+
+        // Start provisioning flow
+        waitForConfigThenProceed();
     }
 
     @Override
     protected void onResume() {
         super.onResume();
-        // Re-apply in case system tries to restore UI
-        enableImmersiveMode();
-        lockVolumeToMax();
+        enableImmersiveModeSafe();
     }
 
     @Override
     public void onWindowFocusChanged(boolean hasFocus) {
         super.onWindowFocusChanged(hasFocus);
-        // If user somehow brings up system UI, slam it back down
-        if (hasFocus) {
-            enableImmersiveMode();
+        if (hasFocus) enableImmersiveModeSafe();
+    }
+
+    // =========================
+    // Provisioning workflow
+    // =========================
+
+    private void waitForConfigThenProceed() {
+        if (!readConfig(DEFAULT_CONFIG_PATH)) {
+            Log.i(TAG, "config.json not found/invalid yet. Waiting for MTP push...");
+            handler.postDelayed(this::waitForConfigThenProceed, CONFIG_RECHECK_MS);
+            return;
+        }
+
+        Log.i(TAG, "Config loaded: ssid=" + ssidFromConfig + ", nodeapp_apk_path=" + nodeApkPathFromConfig);
+
+        // Step 1: connect to WiFi if SSID present
+        if (ssidFromConfig != null && !ssidFromConfig.trim().isEmpty()) {
+            ensureWifiConnected(ssidFromConfig.trim(), this::ensureNodeAppInstalledThenLaunch);
+        } else {
+            ensureNodeAppInstalledThenLaunch();
         }
     }
 
-    private boolean isNodeAppInstalled() {
+    private void ensureNodeAppInstalledThenLaunch() {
+        if (!isPackageInstalled(NODE_APP_PACKAGE)) {
+            File apk = resolveNodeApkFile(nodeApkPathFromConfig);
+            if (apk == null || !apk.exists()) {
+                Log.i(TAG, "NodeApp not installed and APK not found yet. Waiting...");
+                handler.postDelayed(this::ensureNodeAppInstalledThenLaunch, INSTALL_RECHECK_MS);
+                return;
+            }
+
+            // Trigger installer only once; then just poll until installed.
+            if (!installTriggered) {
+                installTriggered = true;
+                Log.i(TAG, "Found NodeApp APK at: " + apk.getAbsolutePath());
+                installApk(apk);
+            }
+
+            handler.postDelayed(this::ensureNodeAppInstalledThenLaunch, INSTALL_RECHECK_MS);
+            return;
+        }
+
+        // Step 3: launch NodeApp
+        launchNodeApp();
+
+        // Step 4: after success, switch USB to charging-only + locktask
+        finalizeKioskAfterSuccess();
+    }
+
+    // =========================
+    // Config
+    // =========================
+
+    /**
+     * Reads config JSON like:
+     * {"ssid": "Office_WiFi_5G","nodeapp_apk_path": "somepath/NodeApp.apk"}
+     */
+    private boolean readConfig(String path) {
         try {
-            getPackageManager().getPackageInfo(NODE_APP_PACKAGE, 0);
+            File f = new File(path);
+            if (!f.exists()) return false;
+
+            StringBuilder sb = new StringBuilder();
+            try (BufferedReader br = new BufferedReader(new FileReader(f))) {
+                String line;
+                while ((line = br.readLine()) != null) sb.append(line);
+            }
+
+            JSONObject obj = new JSONObject(sb.toString());
+            ssidFromConfig = obj.optString("ssid", null);
+            nodeApkPathFromConfig = obj.optString("nodeapp_apk_path", null);
+
+            return nodeApkPathFromConfig != null && !nodeApkPathFromConfig.trim().isEmpty();
+
+        } catch (Exception e) {
+            Log.e(TAG, "Failed to read config.json: " + e.getMessage(), e);
+            return false;
+        }
+    }
+
+    private File resolveNodeApkFile(String nodeappApkPath) {
+        try {
+            if (nodeappApkPath == null) return null;
+            String p = nodeappApkPath.trim();
+            if (p.isEmpty()) return null;
+
+            // absolute path
+            if (p.startsWith("/")) return new File(p);
+
+            // relative to /sdcard
+            File external = Environment.getExternalStorageDirectory(); // /sdcard
+            return new File(external, p);
+
+        } catch (Exception e) {
+            Log.e(TAG, "resolveNodeApkFile error: " + e.getMessage(), e);
+            return null;
+        }
+    }
+
+    // =========================
+    // WiFi (legacy API; open network)
+    // =========================
+
+    private interface SimpleCallback { void run(); }
+
+    private void ensureWifiConnected(String ssidPlain, SimpleCallback onConnected) {
+        WifiManager wifi = (WifiManager) getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+        if (wifi == null) {
+            Log.e(TAG, "WifiManager is null");
+            onConnected.run();
+            return;
+        }
+
+        if (!wifi.isWifiEnabled()) {
+            wifi.setWifiEnabled(true);
+        }
+
+        final String quotedSsid = "\"" + ssidPlain + "\"";
+
+        // already connected?
+        try {
+            String cur = (wifi.getConnectionInfo() != null) ? wifi.getConnectionInfo().getSSID() : null;
+            if (cur != null && cur.equals(quotedSsid)) {
+                Log.i(TAG, "Already connected to WiFi: " + ssidPlain);
+                onConnected.run();
+                return;
+            }
+        } catch (Exception ignored) {}
+
+        int netId = findOrAddOpenNetwork(wifi, quotedSsid);
+        if (netId == -1) {
+            Log.e(TAG, "Failed to find/add WiFi network: " + ssidPlain);
+            handler.postDelayed(() -> ensureWifiConnected(ssidPlain, onConnected), WIFI_RECHECK_MS);
+            return;
+        }
+
+        boolean enabled = wifi.enableNetwork(netId, true);
+        wifi.reconnect();
+
+        Log.i(TAG, "WiFi enableNetwork(" + netId + ")=" + enabled + ", reconnect requested");
+
+        handler.postDelayed(() -> {
+            try {
+                String cur = (wifi.getConnectionInfo() != null) ? wifi.getConnectionInfo().getSSID() : null;
+                if (cur != null && cur.equals(quotedSsid)) {
+                    Log.i(TAG, "Connected to WiFi: " + ssidPlain);
+                    onConnected.run();
+                    return;
+                }
+            } catch (Exception ignored) {}
+
+            ensureWifiConnected(ssidPlain, onConnected);
+        }, WIFI_RECHECK_MS);
+    }
+
+    private int findOrAddOpenNetwork(WifiManager wifi, String quotedSsid) {
+        try {
+            List<WifiConfiguration> configs = wifi.getConfiguredNetworks();
+            if (configs != null) {
+                for (WifiConfiguration c : configs) {
+                    if (quotedSsid.equals(c.SSID)) return c.networkId;
+                }
+            }
+
+            WifiConfiguration wc = new WifiConfiguration();
+            wc.SSID = quotedSsid;
+            wc.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
+            return wifi.addNetwork(wc);
+
+        } catch (Exception e) {
+            Log.e(TAG, "findOrAddOpenNetwork error: " + e.getMessage(), e);
+            return -1;
+        }
+    }
+
+    // =========================
+    // Install & Launch NodeApp
+    // =========================
+
+    private boolean isPackageInstalled(String pkg) {
+        try {
+            getPackageManager().getPackageInfo(pkg, 0);
             return true;
         } catch (PackageManager.NameNotFoundException e) {
             return false;
         }
     }
 
-    private void waitForConfigAndInitialize() {
-        adminMetadata = ConfigReader.readAdminMetadata(this);
-
-        if (adminMetadata == null) {
-            Log.i("KioskActivity", "Config file not found, retrying in 5 seconds...");
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    waitForConfigAndInitialize();
-                }
-            }, CONFIG_RETRY_MS);
-            return;
-        }
-
-        Log.i("KioskActivity", "Config file loaded successfully");
-
-        if (adminMetadata.getSsid() != null) {
-            ensureWifiConnectedToHub();
-        }
-
-        if (!isNodeAppInstalled()) {
-            installNodeApp();
-        } else {
-            setUsbModeToCharging();
-            launchNodeApp();
-        }
-    }
-
-    private void setUsbModeToFileTransfer() {
+    private void installApk(File apkFile) {
         try {
-            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
-
-            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
-                try {
-                    Settings.Global.putString(getContentResolver(),
-                            "usb_mass_storage_enabled", "1");
-                } catch (Exception e) {
-                    Log.e("KioskActivity", "Failed to set USB mode: " + e.getMessage());
-                }
-            }
-            Log.i("KioskActivity", "USB mode set to File Transfer");
+            // Standard installer UI (no ADB; no silent install)
+            Intent intent = new Intent(Intent.ACTION_VIEW);
+            intent.setDataAndType(Uri.fromFile(apkFile), "application/vnd.android.package-archive");
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK);
+            startActivity(intent);
+            Log.i(TAG, "Triggered installer for: " + apkFile.getAbsolutePath());
         } catch (Exception e) {
-            Log.e("KioskActivity", "USB setup failed: " + e.getMessage());
-        }
-    }
-
-    private void setUsbModeToCharging() {
-        try {
-            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
-
-            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
-                try {
-                    Settings.Global.putString(getContentResolver(),
-                            "usb_mass_storage_enabled", "0");
-                } catch (Exception e) {
-                    Log.e("KioskActivity", "Failed to set USB mode: " + e.getMessage());
-                }
-            }
-            Log.i("KioskActivity", "USB mode set to Charging");
-        } catch (Exception e) {
-            Log.e("KioskActivity", "USB mode change failed: " + e.getMessage());
-        }
-    }
-
-    private void ensureDeviceOwnerAndLockTask() {
-        DevicePolicyManager dpm =
-                (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-        ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
-
-        if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
-            String[] packages = new String[]{ NODE_APP_PACKAGE, getPackageName() };
-            dpm.setLockTaskPackages(admin, packages);
-
-            // OS-level volume lock
-            dpm.addUserRestriction(admin, UserManager.DISALLOW_ADJUST_VOLUME);
-
-            // OS-level brightness config lock
-            dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BRIGHTNESS);
-
-            // Try to disable status bar / notification shade
-            try {
-                dpm.setStatusBarDisabled(admin, true);
-            } catch (Exception ignored) {
-                // Not supported on all devices / Android versions
-            }
-
-            try {
-                startLockTask();
-            } catch (IllegalStateException e) {
-                Log.e("KioskActivity", "LockTask failed: " + e.getMessage());
-            }
-        } else {
-            Log.w("KioskActivity", "Device is not device-owner. Run dpm set-device-owner.");
-        }
-    }
-
-    private void ensureWifiConnectedToHub() {
-    WifiManager wifiManager = (WifiManager) getApplicationContext()
-            .getSystemService(Context.WIFI_SERVICE);
-    if (wifiManager == null) return;
-
-    if (adminMetadata == null || adminMetadata.getSsid() == null ||
-        adminMetadata.getSsid().isEmpty()) {
-        return;
-    }
-
-    String ssid = "\"" + adminMetadata.getSsid() + "\"";
-
-    if (!wifiManager.isWifiEnabled()) {
-        wifiManager.setWifiEnabled(true);
-    }
-
-    WifiConfiguration targetConfig = null;
-
-    List<WifiConfiguration> configs = wifiManager.getConfiguredNetworks();
-    if (configs != null) {
-        for (WifiConfiguration c : configs) {
-            if (ssid.equals(c.SSID)) {
-                targetConfig = c;
-                break;
-            }
-        }
-    }
-
-    if (targetConfig == null) {
-        // OPEN NETWORK CONFIG
-        WifiConfiguration wc = new WifiConfiguration();
-        wc.SSID = ssid;   // must already be quoted
-        wc.allowedKeyManagement.set(WifiConfiguration.KeyMgmt.NONE);
-        wc.allowedProtocols.set(WifiConfiguration.Protocol.RSN);
-        wc.allowedProtocols.set(WifiConfiguration.Protocol.WPA);
-        wc.allowedAuthAlgorithms.clear();
-        wc.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.CCMP);
-        wc.allowedPairwiseCiphers.set(WifiConfiguration.PairwiseCipher.TKIP);
-        wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.CCMP);
-        wc.allowedGroupCiphers.set(WifiConfiguration.GroupCipher.TKIP);
-
-        int netId = wifiManager.addNetwork(wc);
-        if (netId == -1) {
-            Log.e("KioskActivity", "Failed to add WiFi network: " + ssid);
-            return;
-        }
-        boolean enabled = wifiManager.enableNetwork(netId, true);
-        if (!enabled) {
-            Log.e("KioskActivity", "Failed to enable WiFi network: " + ssid);
-            return;
-        }
-    } else {
-        boolean enabled = wifiManager.enableNetwork(targetConfig.networkId, true);
-        if (!enabled) {
-            Log.e("KioskActivity", "Failed to enable existing WiFi network: " + ssid);
-            return;
-        }
-    }
-
-    wifiManager.reconnect();
-}
-
-    private void installNodeApp() {
-        if (adminMetadata == null || adminMetadata.getNodeappApkPath() == null) {
-            Log.e("KioskActivity", "No APK path configured");
-            return;
-        }
-
-        if (isInstallingApp) {
-            Log.i("KioskActivity", "Installation already in progress");
-            return;
-        }
-
-        File externalStorage = Environment.getExternalStorageDirectory();
-        File apkFile = new File(externalStorage, adminMetadata.getNodeappApkPath());
-
-        if (!apkFile.exists()) {
-            Log.e("KioskActivity", "APK file not found: " + apkFile.getAbsolutePath());
-            handler.postDelayed(new Runnable() {
-                @Override
-                public void run() {
-                    installNodeApp();
-                }
-            }, NODEAPP_RECHECK_MS);
-            return;
-        }
-
-        isInstallingApp = true;
-        Log.i("KioskActivity", "Installing NodeApp from: " + apkFile.getAbsolutePath());
-
-        try {
-            DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
-            ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
-
-            if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
-                Uri apkUri = Uri.fromFile(apkFile);
-                Intent intent = new Intent(Intent.ACTION_INSTALL_PACKAGE);
-                intent.setData(apkUri);
-                intent.setFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION);
-                intent.putExtra(Intent.EXTRA_RETURN_RESULT, true);
-                intent.putExtra(Intent.EXTRA_NOT_UNKNOWN_SOURCE, true);
-                startActivityForResult(intent, INSTALL_REQUEST_CODE);
-            } else {
-                Log.e("KioskActivity", "Not device owner, cannot install APK");
-                isInstallingApp = false;
-            }
-        } catch (Exception e) {
-            Log.e("KioskActivity", "Failed to install APK: " + e.getMessage());
-            isInstallingApp = false;
-        }
-    }
-
-    @Override
-    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
-        super.onActivityResult(requestCode, resultCode, data);
-        if (requestCode == INSTALL_REQUEST_CODE) {
-            isInstallingApp = false;
-            if (resultCode == RESULT_OK) {
-                Log.i("KioskActivity", "NodeApp installed successfully");
-                setUsbModeToCharging();
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        launchNodeApp();
-                    }
-                }, 2000);
-            } else {
-                Log.e("KioskActivity", "NodeApp installation failed");
-                handler.postDelayed(new Runnable() {
-                    @Override
-                    public void run() {
-                        installNodeApp();
-                    }
-                }, NODEAPP_RECHECK_MS);
-            }
+            Log.e(TAG, "installApk failed: " + e.getMessage(), e);
+            installTriggered = false; // allow retry if it failed to even start
         }
     }
 
     private void launchNodeApp() {
-        Intent intent = new Intent();
-        intent.setClassName(NODE_APP_PACKAGE, NODE_APP_MAIN_ACTIVITY);
-        intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
+        if (launchAttempted) return;
+        launchAttempted = true;
+
         try {
+            Intent intent = new Intent();
+            intent.setClassName(NODE_APP_PACKAGE, NODE_APP_MAIN_ACTIVITY);
+            intent.addFlags(Intent.FLAG_ACTIVITY_NEW_TASK | Intent.FLAG_ACTIVITY_CLEAR_TOP);
             startActivity(intent);
-            Log.i("KioskActivity", "Launching NodeApp");
+            Log.i(TAG, "Launching NodeApp...");
         } catch (Exception e) {
-            Log.e("KioskActivity", "Failed to launch NodeApp: " + e.getMessage());
+            Log.e(TAG, "Failed to launch NodeApp: " + e.getMessage(), e);
+            launchAttempted = false;
         }
     }
 
-    private void forceMaxBrightness() {
+    // =========================
+    // Device Owner / Kiosk
+    // =========================
+
+    private void ensurePoliciesIfDeviceOwner() {
+        DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+        ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+        if (dpm == null) return;
+
+        if (!dpm.isDeviceOwnerApp(getPackageName())) {
+            Log.w(TAG, "Not device owner. Cannot force HOME or LockTask packages.");
+            return;
+        }
+
+        // 1) Force our activity as default HOME
         try {
-            // Disable auto-brightness
-            Settings.System.putInt(
-                    getContentResolver(),
-                    Settings.System.SCREEN_BRIGHTNESS_MODE,
-                    Settings.System.SCREEN_BRIGHTNESS_MODE_MANUAL
-            );
-
-            // Set brightness to max (255)
-            Settings.System.putInt(
-                    getContentResolver(),
-                    Settings.System.SCREEN_BRIGHTNESS,
-                    255
-            );
-
-            // Apply immediately to this window
-            WindowManager.LayoutParams layoutParams = getWindow().getAttributes();
-            layoutParams.screenBrightness = 1.0f; // 100%
-            getWindow().setAttributes(layoutParams);
-
+            IntentFilter filter = new IntentFilter(Intent.ACTION_MAIN);
+            filter.addCategory(Intent.CATEGORY_HOME);
+            filter.addCategory(Intent.CATEGORY_DEFAULT);
+            ComponentName home = new ComponentName(getPackageName(), KioskActivity.class.getName());
+            dpm.addPersistentPreferredActivity(admin, filter, home);
+            Log.i(TAG, "Set persistent preferred HOME to KioskActivity");
         } catch (Exception e) {
-            Log.e("KioskActivity", "Brightness lock failed: " + e.getMessage());
+            Log.e(TAG, "addPersistentPreferredActivity failed: " + e.getMessage(), e);
+        }
+
+        // 2) Allow LockTask for our app + NodeApp
+        try {
+            dpm.setLockTaskPackages(admin, new String[]{ getPackageName(), NODE_APP_PACKAGE });
+        } catch (Exception e) {
+            Log.e(TAG, "setLockTaskPackages failed: " + e.getMessage(), e);
+        }
+
+        // 3) Optional restrictions (do NOT touch USB file transfer here!)
+        try {
+            dpm.addUserRestriction(admin, UserManager.DISALLOW_ADJUST_VOLUME);
+            dpm.addUserRestriction(admin, UserManager.DISALLOW_CONFIG_BRIGHTNESS);
+        } catch (Exception ignored) {}
+    }
+
+    private void finalizeKioskAfterSuccess() {
+        DevicePolicyManager dpm = (DevicePolicyManager) getSystemService(Context.DEVICE_POLICY_SERVICE);
+        ComponentName admin = new ComponentName(this, KioskDeviceAdminReceiver.class);
+
+        if (dpm != null && dpm.isDeviceOwnerApp(getPackageName())) {
+            // Disable USB file transfer only AFTER provisioning is done
+            try {
+                dpm.addUserRestriction(admin, UserManager.DISALLOW_USB_FILE_TRANSFER);
+                Log.i(TAG, "USB file transfer disabled (charging-only behavior).");
+            } catch (Exception e) {
+                Log.e(TAG, "DISALLOW_USB_FILE_TRANSFER failed: " + e.getMessage(), e);
+            }
+
+            // Start lock task (kiosk)
+            try {
+                startLockTask();
+                Log.i(TAG, "LockTask started.");
+            } catch (Exception e) {
+                Log.e(TAG, "startLockTask failed: " + e.getMessage(), e);
+            }
         }
     }
+
+    // =========================
+    // UI / Hardening
+    // =========================
 
     private void keepScreenOn() {
         getWindow().addFlags(WindowManager.LayoutParams.FLAG_KEEP_SCREEN_ON);
     }
 
+    private void forceMaxBrightness() {
+        try {
+            WindowManager.LayoutParams lp = getWindow().getAttributes();
+            lp.screenBrightness = 1.0f;
+            getWindow().setAttributes(lp);
+        } catch (Exception ignored) {}
+    }
+
     /**
-     * Hide nav bar, status bar, recents button via immersive sticky mode.
+     * FIXED: Lenovo Android 13 can return null insets controller early in onCreate.
+     * We use decorView.getWindowInsetsController() and retry if null.
      */
-    private void enableImmersiveMode() {
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            WindowInsetsController controller = getWindow().getInsetsController();
-            if (controller != null) {
+    private void enableImmersiveModeSafe() {
+        try {
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                View decor = getWindow().getDecorView();
+                if (decor == null) return;
+
+                WindowInsetsController controller = decor.getWindowInsetsController();
+                if (controller == null) {
+                    // Not ready yet on some OEM builds; retry shortly
+                    handler.postDelayed(this::enableImmersiveModeSafe, 200);
+                    return;
+                }
+
                 controller.hide(WindowInsets.Type.statusBars() | WindowInsets.Type.navigationBars());
                 controller.setSystemBarsBehavior(
-                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE);
+                        WindowInsetsController.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+                );
+            } else {
+                View decorView = getWindow().getDecorView();
+                if (decorView == null) return;
+
+                decorView.setSystemUiVisibility(
+                        View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
+                                | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
+                                | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
+                                | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
+                                | View.SYSTEM_UI_FLAG_FULLSCREEN
+                );
             }
-        } else {
-            View decorView = getWindow().getDecorView();
-            decorView.setSystemUiVisibility(
-                    View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY
-                            | View.SYSTEM_UI_FLAG_LAYOUT_STABLE
-                            | View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN
-                            | View.SYSTEM_UI_FLAG_HIDE_NAVIGATION
-                            | View.SYSTEM_UI_FLAG_FULLSCREEN
-            );
+        } catch (Throwable t) {
+            Log.e(TAG, "enableImmersiveModeSafe failed", t);
         }
     }
 
-    private void lockVolumeToMax() {
-        AudioManager audioManager =
-                (AudioManager) getSystemService(Context.AUDIO_SERVICE);
-        if (audioManager == null) return;
-
-        int maxMusic = audioManager.getStreamMaxVolume(AudioManager.STREAM_MUSIC);
-        int maxRing  = audioManager.getStreamMaxVolume(AudioManager.STREAM_RING);
-        int maxAlarm = audioManager.getStreamMaxVolume(AudioManager.STREAM_ALARM);
-
-        audioManager.setStreamVolume(AudioManager.STREAM_MUSIC, maxMusic, 0);
-        audioManager.setStreamVolume(AudioManager.STREAM_RING,  maxRing,  0);
-        audioManager.setStreamVolume(AudioManager.STREAM_ALARM, maxAlarm, 0);
-    }
-
-    /**
-     * Swallow hardware volume keys so user can't change volume.
-     */
+    // swallow volume keys
     @Override
     public boolean onKeyDown(int keyCode, KeyEvent event) {
         if (keyCode == KeyEvent.KEYCODE_VOLUME_UP
@@ -435,3 +448,4 @@ public class KioskActivity extends Activity {
         return super.onKeyUp(keyCode, event);
     }
 }
+

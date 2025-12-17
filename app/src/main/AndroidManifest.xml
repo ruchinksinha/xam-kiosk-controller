@@ -3,90 +3,90 @@
     xmlns:android="http://schemas.android.com/apk/res/android"
     xmlns:tools="http://schemas.android.com/tools">
 
-    <!-- Permissions -->
+    <!-- Boot + network -->
     <uses-permission android:name="android.permission.RECEIVE_BOOT_COMPLETED" />
+    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
-    <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
-    <uses-permission android:name="android.permission.WRITE_SETTINGS" />
-    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
-    <uses-permission android:name="android.permission.DISABLE_KEYGUARD" />
-    <uses-permission android:name="android.permission.WAKE_LOCK" />
-    <uses-permission android:name="android.permission.INTERNET" />
-    <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.WRITE_EXTERNAL_STORAGE" />
-    <uses-permission android:name="android.permission.MANAGE_EXTERNAL_STORAGE"
-        tools:ignore="ScopedStorage" />
-    <uses-permission android:name="android.permission.REQUEST_INSTALL_PACKAGES" />
-    <uses-permission
-        android:name="android.permission.PACKAGE_USAGE_STATS"
-        tools:ignore="ProtectedPermissions" />
-    <uses-permission
-        android:name="android.permission.MANAGE_DEVICE_ADMINS"
-        tools:ignore="ProtectedPermissions" />
 
-    <uses-feature android:name="android.hardware.usb.host" android:required="false" />
+    <!-- Required for startForegroundService() on Android 9+ -->
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+
+    <!-- External storage (for config.json + NodeApp.apk provisioning) -->
+    <uses-permission
+        android:name="android.permission.READ_EXTERNAL_STORAGE"
+        android:maxSdkVersion="32" />
+    <uses-permission
+        android:name="android.permission.WRITE_EXTERNAL_STORAGE"
+        android:maxSdkVersion="28" />
+
+    <!-- Kiosk UX -->
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
 
     <application
         android:label="KioskController"
-        android:icon="@android:mipmap/sym_def_app_icon"
-        android:allowBackup="false">
+        android:allowBackup="false"
+        android:supportsRtl="true"
+        android:usesCleartextTraffic="true"
+        android:requestLegacyExternalStorage="true"
+        tools:targetApi="q">
 
-        <!-- Device Admin receiver -->
+        <!-- ========================= -->
+        <!-- Device Owner / Admin -->
+        <!-- ========================= -->
         <receiver
-            android:name=".admin.KioskDeviceAdminReceiver"
-            android:label="Kiosk Device Admin"
+            android:name="com.xam.kiosk.admin.KioskDeviceAdminReceiver"
             android:permission="android.permission.BIND_DEVICE_ADMIN"
             android:exported="true">
             <meta-data
                 android:name="android.app.device_admin"
                 android:resource="@xml/device_admin_receiver" />
-
             <intent-filter>
                 <action android:name="android.app.action.DEVICE_ADMIN_ENABLED" />
             </intent-filter>
         </receiver>
 
-        <!-- Boot completed receiver: auto-start kiosk on boot -->
+        <!-- ========================= -->
+        <!-- Boot receiver -->
+        <!-- ========================= -->
         <receiver
-            android:name=".boot.BootCompletedReceiver"
+            android:name="com.xam.kiosk.boot.BootCompletedReceiver"
             android:enabled="true"
             android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.BOOT_COMPLETED" />
-                <!-- Optional: if you support direct boot -->
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
             </intent-filter>
         </receiver>
 
-        <!-- USB connection receiver: handle USB connect/disconnect -->
-        <receiver
-            android:name=".usb.UsbConnectionReceiver"
-            android:enabled="true"
-            android:exported="true">
-            <intent-filter>
-                <action android:name="android.hardware.usb.action.USB_STATE" />
-            </intent-filter>
-        </receiver>
+        <!-- ========================= -->
+        <!-- Foreground service used to launch activity reliably after boot -->
+        <!-- ========================= -->
+        <service
+            android:name="com.xam.kiosk.boot.BootLaunchService"
+            android:exported="false" />
 
-        <!-- Kiosk activity that enforces lock task and launches node-app -->
+        <!-- ========================= -->
+        <!-- Kiosk HOME Activity -->
+        <!-- ========================= -->
         <activity
-            android:name=".ui.KioskActivity"
+            android:name="com.xam.kiosk.ui.KioskActivity"
+            android:exported="true"
             android:excludeFromRecents="true"
             android:launchMode="singleTask"
-            android:screenOrientation="portrait"
             android:taskAffinity=""
-            android:immersive="true"
-            android:exported="true">
+            android:screenOrientation="portrait">
 
+            <!-- This activity is both LAUNCHER + HOME -->
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />
-
-                <!-- Make this the home screen / launcher -->
                 <category android:name="android.intent.category.HOME" />
                 <category android:name="android.intent.category.DEFAULT" />
+                <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
+
         </activity>
 
     </application>
 </manifest>
+
