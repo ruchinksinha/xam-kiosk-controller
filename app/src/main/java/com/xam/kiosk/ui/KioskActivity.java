@@ -337,7 +337,7 @@ public class KioskActivity extends Activity {
 
         // 2) Allow LockTask for our app + NodeApp
         try {
-            dpm.setLockTaskPackages(admin, new String[]{ getPackageName(), NODE_APP_PACKAGE });
+            dpm.setLockTaskPackages(admin, new String[]{ getPackageName(), NODE_APP_PACKAGE, "com.android.systemui" });
         } catch (Exception e) {
             Log.e(TAG, "setLockTaskPackages failed: " + e.getMessage(), e);
         }

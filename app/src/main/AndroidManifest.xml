@@ -8,6 +8,8 @@
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <uses-permission android:name="android.permission.CHANGE_WIFI_STATE" />
+    <uses-permission android:name="android.permission.WRITE_SECURE_SETTINGS" />
+
 
     <!-- Required for startForegroundService() on Android 9+ -->
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
@@ -31,6 +33,7 @@
         android:requestLegacyExternalStorage="true"
         tools:targetApi="q">
 
+
         <!-- ========================= -->
         <!-- Device Owner / Admin -->
         <!-- ========================= -->
@@ -52,10 +55,12 @@
         <receiver
             android:name="com.xam.kiosk.boot.BootCompletedReceiver"
             android:enabled="true"
-            android:exported="true">
+		android:exported="true"
+		android:directBootAware="true">
             <intent-filter>
-                <action android:name="android.intent.action.BOOT_COMPLETED" />
                 <action android:name="android.intent.action.LOCKED_BOOT_COMPLETED" />
+                <action android:name="android.intent.action.BOOT_COMPLETED" />
+	        <action android:name="android.intent.action.USER_UNLOCKED" />
             </intent-filter>
         </receiver>
 
